@@ -1,0 +1,88 @@
+services:
+  step-ca:
+    image: smallstep/step-ca
+    restart: unless-stopped
+    networks:
+      - default
+    volumes:
+      - ./step-ca:/home/step
+    extra_hosts:
+      - whoami.host.localmachine:host-gateway
+
+  traefik:
+    image: traefik:v2.9
+    container_name: reverse_proxy
+    restart: unless-stopped
+    depends_on:
+      - step-ca
+    command:
+      - '--global.sendAnonymousUsage=false'
+      # Providers:
+      # Docker (controlled by labels)
+      - '--providers.docker'
+      - '--providers.docker.exposedbydefault=false'
+      - '--providers.docker.network=traefik_default'
+      # File (watch folder `/providers`)
+      - '--providers.file'
+      - '--providers.file.directory=/providers'
+      - '--providers.file.watch=true'
+      # create entrypoints: epWeb + epWebsecure
+      - '--entrypoints.epWeb.address=:80'
+      - '--entrypoints.epWebsecure.address=:443'
+      - '--certificatesResolvers.stepCaResolver.acme.dnsChallenge=false'
+      - '--certificatesResolvers.stepCaResolver.acme.tlsChallenge=true'
+      - '--certificatesResolvers.stepCaResolver.acme.email=admin'
+      - '--certificatesResolvers.stepCaResolver.acme.storage=/acme.json'
+      - '--certificatesresolvers.stepCaResolver.acme.caserver=https://step-ca:443/acme/acme/directory'
+      - '--certificatesResolvers.stepCaResolver.acme.httpChallenge=true'
+      - '--certificatesResolvers.stepCaResolver.acme.httpChallenge.entryPoint=epWeb'
+      - '--ping=true'
+      - '--api.insecure=true'
+    ports:
+      - 80:80
+      - 443:443
+      - 8080:8080
+    volumes:
+      - ./providers/:/providers
+      - ./step-ca/certs/root_ca.crt:/usr/local/share/ca-certificates/stepca_root_ca.crt
+      - /var/run/docker.sock:/var/run/docker.sock:ro
+    environment:
+      - LEGO_CA_CERTIFICATES=/usr/local/share/ca-certificates/stepca_root_ca.crt
+      - LEGO_CA_SERVER_NAME=step-ca
+    healthcheck:
+      test: ['CMD', 'traefik', 'healthcheck', '--ping']
+      interval: 10s
+      timeout: 10s
+      retries: 5
+    networks:
+      - default
+  
+  whoami:
+    image: traefik/whoami:latest
+    restart: unless-stopped
+    labels:
+      - traefik.enable=true
+      # Routers are https only (tls=true)
+      # Routers 1: by path
+      - traefik.http.routers.rWhoamiPath.rule=Path(`/admin/whoami`)
+      - traefik.http.routers.rWhoamiPath.entrypoints=epWebsecure
+      - traefik.http.routers.rWhoamiPath.tls=true
+      - traefik.http.routers.rWhoamiPath.middlewares=mwWhoamiRemovePath
+      # Routers 2: by host
+      - traefik.http.routers.rWhoamiSubdomain1.rule=Host(`whoami.host.localmachine`)
+      - traefik.http.routers.rWhoamiSubdomain1.entrypoints=epWeb
+      - traefik.http.routers.rWhoamiSubdomain.rule=Host(`whoami.host.localmachine`)
+      - traefik.http.routers.rWhoamiSubdomain.entrypoints=epWebsecure
+      - traefik.http.routers.rWhoamiSubdomain.tls=true
+      - traefik.http.routers.rWhoamiSubdomain.tls.certResolver=stepCaResolver
+      # middlewares
+      ## remove-path: strip prefix /admin/whoami
+      - traefik.http.middlewares.mwWhoamiRemovePath.stripprefix.prefixes=/admin/whoami
+    networks:
+      - default
+
+networks:
+  # traefik_default is the default name for a traefik network - specify this explicitly here
+  # external means it needs to exist before `docker compose up`
+  default:
+    external: false
